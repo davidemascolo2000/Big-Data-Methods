@@ -1,0 +1,950 @@
+---
+title: "AmesHousing Analysis"
+author: "Davide Mascolo"
+date: "12 Gennaio 2021"
+output: html_document
+---
+
+```{r setup, echo=FALSE, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+require("knitr")
+opts_knit$set(
+  root.dir = "C:/Users/david/Desktop/AmesHousing_Project")
+```
+
+### Presentazione del problema
+**Si vuole prevedere il prezzo di alcune case in vendita ad Ames, Iowa.**
+
+
+#### Informazioni sui dati
+**Il set di dati di Ames Housing contiente 80 variabili**
+
+Per maggiori informazioni clicca
+[qui.](https://cran.r-project.org/web/packages/AmesHousing/AmesHousing.pdf)
+
+<center>
+![](C:\Users\david\Desktop\AmesHousing_Project\635943415687730000.png)
+
+</center>
+
+### Step 1 - Data Wrangling
+```{r}
+## Carico dati e librerie
+library(AmesHousing)
+library(tidyverse)
+library(rsample)
+library(caret)
+library(png)
+library(grid)
+library(ggthemes)
+library(ggpubr)
+library(corrplot)
+library(rsample)
+library(glmnet)
+library(plotly)
+
+## Data Wrangling
+ames <- make_ordinal_ames()
+
+n0 <- sum(table(ames$Sale_Condition))
+n1 <- table(ames$Sale_Condition)
+n1 <- n1[5]
+
+N <- ames %>% 
+  select(Sale_Condition) %>% 
+  group_by(Sale_Condition) %>% 
+  summarise(count = n()) %>% 
+  mutate(Somma = sum(count),
+         PercSup = count/Somma *100,
+         Perc = round(PercSup, 2)) %>% 
+  select(-c(Somma,PercSup))
+
+N %>% 
+  ggplot(aes(reorder(x = Sale_Condition, count), y = count)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = Perc), vjust = 1.6, color = "white",
+            size = 3.5) +
+  ggtitle("Condizioni di vendita [%]") +
+  xlab("") +
+  ylab("Numero di Case")
+
+
+ames_new <- ames %>% 
+  filter(Sale_Condition == "Normal")
+
+## Valori mancanti
+ames <- na.omit(ames_new)
+```
+
+La prima fase riguarda la pulizia dei dati, partendo da raw data.
+Le operazioni effettuate sono state le seguenti:
+
+* Tutti i **fattori** sono stati **ordinati.**
+
+* **PID ed Order** vengono **rimossi.**
+
+* **Gli spazi ed i caratteri speciali** nei nomi delle variabili **vengono modificati.**  Ad esempio, **SalePrice diventa Sale_Price.**
+
+* Dove possibile, **molti valori mancanti sono stati ripristinati**,
+ad esempio con la variabile **No_Basement.** 
+
+* In altri casi, **variabili conteneti troppi valori mancanti sono state rimosse(Garage_Yr_Blt).**
+
+* Concentrandoci sulla variabile **Sale_Condition**, che indica la **condizione di vendita** di un alloggio, prendiamo in considerazione solo le **vendite "Normal", che sono l'82%.** delle vendite registrate nel campione.
+
+* Le **altre tipologie** di vendite riguardano **vendite parziali, pignoramenti, case ereditate e vendite allo scoperto,** sulle quali andrebbe fatto un **discorso diverso** per prevedene il prezzo in quanto **seguono modelli diversi dalle vendite normali.**
+
+<br>
+
+### Step 2 - EDA
+### Analisi Spaziale e Temporale 
+```{r}
+## Localizziamo i label per i quartieri
+ames_neigh <- ames %>%
+  group_by(Neighborhood) %>%
+  summarise(n=n(),
+            Longitude=mean(Longitude),
+            Latitude=mean(Latitude))
+```
+
+#### Spazio
+
+![](C:\Users\david\Desktop\AmesHousing_Project\Rplot07.png)
+```{r}
+## Rendiamoci conto delle zone sulla mappa
+googlemap <- readPNG("Boubdry2018-1024x996.png")
+
+#ames %>%
+  #ggplot(aes(x = Longitude,y = Latitude,color = Neighborhood)) + 
+  #annotation_custom(rasterGrob(googlemap,
+                               #width = unit(1,"npc"),
+                               #height = unit(1,"npc")),
+                    #-Inf, Inf, -Inf, Inf) +
+  #geom_point(alpha=0.15) + 
+  #scale_y_continuous(limits = c(41.988,42.073)) +
+  #scale_x_continuous(limits = c(-93.696,-93.565)) +
+  #geom_label(data = ames_neigh,
+      #       label = ames_neigh$Neighborhood,
+       #      alpha = 0.8, size = 3) + 
+  #ggtitle("Neighborhoods Ames, IA") +
+  #theme(legend.position = "none")
+```
+
+* Ames si trova lungo il **confine occidentale della Story County**, vicino all'incrocio tra **l'Interstate 35 e la U.S. Route 30.**
+Un'altra strada, ovvero la **U.S. Route 69**, attraversa Ames.
+Non solo le strade attraversano Ames, ma anche due piccoli corsi d'acqua, il **South Skunk River ed il Dquaw Creek. ** 
+
+* Questa prima analisi, aiuta a focalizzarsi meglio sul problema, dividendo Ames in cinque distretti: **Fellows, Meeker, Mitchell, Edwards e Sawyer.**
+
+* **Fellows** risulta il distretto maggiormente esposto a **Nord**, dove ci sono quartieri come **Northridge** e la rispettiva zona alta, **Greens e Veenker** nella zona centrale, **Somerset**, ed al confine troviamo la zona alta di **Bloomington** ed il quartiere **Gilbert**.
+
+* Verso **est** troviamo il distretto del **Meeker**, che si divide tra **Old Town e Brookside nella zona bassa**, **Nord Ames** a Nord, ed al **confine con Fellows** troviamo **Stone Brook, Northpark Villa e Briardale**, con il quartiere Nord-Ovest di Ames che segna in maniera importante il confine tra i distretti Fellows e Meeker.
+
+* **Mitchell** risulta il distretto con **maggiore estensione territoriale**; nonostante questo dato, abbiamo, nel nostro campione, **pochi alloggi** che appartengono a questa regione.
+Gli unici, infatti, si trovano nel **Meadow Village**, nella zona maggiormente esposta a **sud-est**.
+**Altri** alloggi li troviamo verso il quartiere **Timberland**, nel **centro-sud** del Mitchell ed un altro gruppo di case si vedono al confine tra il quartiere **Crawford e la zona a sud della Iowa State University.**
+
+* Proprio la **State University** rappresenta il **punto di contatto** tra il distretto del **Sawyer ed Edwards**, in quanto le case che circondano questo edificio storico, si trovano principalmente in questi due distretti
+
+<br>
+
+#### Quali zone sono state costruite recentemente? 
+
+![](C:\Users\david\Desktop\AmesHousing_Project\Rplot.png)
+```{r}
+## Ciò potrebbe impattare sui prezzi delle case in quel quartiere.
+#supp <- cut_width(ames$Year_Built, 20)
+#supp <- factor(supp, labels = c("1872 - 1890", "1891 - 1910",
+                     #           "1911 - 1930", "1931 - 1950",
+                      #          "1951 - 1970", "1971 - 1990",
+                       #         "1991 - 2010"))
+
+#ames %>% 
+ # ggplot(aes(x = Longitude, y = Latitude,
+  #           color = supp)) +
+   #   annotation_custom(rasterGrob(googlemap,
+    #                           width = unit(1,"npc"),
+     #                          height = unit(1,"npc")),
+      #              -Inf, Inf, -Inf, Inf) +
+  #scale_y_continuous(limits = c(41.988,42.073)) +
+  #scale_x_continuous(limits = c(-93.696,-93.565)) +
+  #geom_point() + 
+  #scale_color_discrete(name = "Year of Built") + 
+  #ggtitle("Year of Built Vs Neighborhood")
+
+```
+
+* Le case costruite tra il **1872 ed il 1890**, si trovano nella zona **sud-est del distretto Meeker**.
+
+* Anche le case costruite tra il **1891 ed il 1910**, si trovano nello **stesso distretto** delle case costruite nel decennio prima.
+Notiamo che nella **zona universitaria**, abbiamo qualche immobile che risale a fine **'800/inizio '900** e questo, data la 
+presenza della State University nei dintorni, ci fa pensare che si
+tratti di **stabilimenti universitari**.
+
+* Spostandoci verso il **centro-est** troviamo quelle case il cui
+anno di costruzione risale agli anni tra il **1911 ed il 1930**.
+
+* Continuando verso i **confini di Ames**, troviamo
+le case che rispettivamente sono state costruite tra 
+il **1931 ed il 1950**, maggiormente nella zona a **nord-est del distretto Meeker**, ed a **sud-ovest della State University**.
+Sempre in questa zona, fissando come riferimento lo stabilimento universitario, troviamo le case costruite tra il **1971 ed il 1990** ed ancora **verso il confine** abbiamo le case con **costruzione meno datate** ovvero risalenti al **(1991;2010]**.
+
+* La **struttura di questi dati temporali**, indica che
+effettivamente sul nostro campione, **la costruzione delle case
+ha avuto come punto di partenza il sud-Meeker per poi spostarsi verso l'esterno.**
+Infine, **a partire dal 1950, sono iniziate le costruzioni nella zona sud-est del Mitchell.**
+
+<br>
+
+#### Prezzi delle case per ogni quartiere.
+
+![](C:\Users\david\Desktop\AmesHousing_Project\Rplot01.png)
+```{r}
+# ames %>% 
+  #ggplot(aes(x = Longitude, y = Latitude,
+   #          color = cut_number(Sale_Price/1000, 7))) +
+    #  annotation_custom(rasterGrob(googlemap,
+     #                          width = unit(1,"npc"),
+      #                         height = unit(1,"npc")),
+       #             -Inf, Inf, -Inf, Inf) +
+  #scale_y_continuous(limits = c(41.988,42.073)) +
+  #scale_x_continuous(limits = c(-93.696,-93.565)) +
+  #geom_point() + 
+  #scale_color_discrete(name = "SalePrice in $1000") + 
+  #ggtitle("SalePrice Vs Neighborhood")
+```
+
+* **Quartieri diversi, hanno prezzo diversi**,
+sia in termini di **cifre** che di **tenuta del prezzo stesso**.
+
+* Il distretto del **Nord-Fellows**, ad esempio, oltre ad essere un distretto **giovane** per l'anno di costruzione, si dimostra anche
+un distretto con **prezzi maggiori**. 
+Questo **dipende proprio dall'anno di costruzione** delle abitazioni, ma probabilmente anche dalla vicinanza al famoso club, **Ames Country Club.**
+
+* **Nel distretto di Sawyer**, ci sono **molte case costruite tra il 1995 ed il 2010**, quindi recenti rispetto alle altre case contenute nel campione.
+Questo farebbe pensare che il prezzo delle case sia alto in questo distretto, ma qui possiamo fare una divisione in due sub-regioni.
+Si vede che verso il confine ad Ovest del Sawyer, abbiamo un gruppetto importante di case con prezzi tra i **170.000$ ed i 196.000$.**
+
+* Spostandoci verso la State University, invece, aumentano le case con prezzi tra i **115.000$ ed i 134.000$ ** ed altre ancora con prezzi tra i **35.000$ ed i 114.000$. **
+Questo aspetto trova coerenza con il fenomeno sociale di Ames, ovvero che la zona universitaria ha una consistenza abitativa importante, che ospita molti appartamenti per studenti, locali notturni, ristoranti ed altri stabilimenti unici di Ames.
+
+* Infine, risulta interessante notare cosa accade a **Sud del distretto del Mitchell**, dove nonostante ci siano **molte case costruite recentemente, i prezzi** nella maggior parte delle abitazioni
+sono nella **fascia medio-bassa, ** probabilmente per la troppa vicinanza all' **Ames Municipal Airport**, collocato proprio a ridosso dell'intersezione tra la **U.S. Route 30 e la U.S. Route 69.**
+
+<br>
+
+#### Numero di case vendute per ogni quartiere
+```{r}
+## Vediamo il numero di case vendute per ogni quartiere
+cn <- ames %>% 
+  group_by(Neighborhood) %>% 
+  summarise(count = n()) %>% 
+  arrange(count, desc = T)
+
+## Graficamente
+cn %>% 
+  ggplot(aes(x = reorder(Neighborhood, count), y = count)) +
+  geom_bar(stat = "identity", col = "black") +
+  geom_text(aes(label = count), hjust = 1, nudge_y = -.1,
+            color = "white",
+            size = 3.5) +
+  coord_flip() +
+  ggtitle("N.House Vs. Neighborhood") +
+  xlab("") +
+  ylab("") 
+  
+```
+
+* Il distretto in cui si registra il numero di case **maggiormente vendute** risulta **North Ames**, ovvero la zona a **Nord del Meeker.**
+
+* Come abbiamo visto in precedenza, la maggior parte degli alloggi in quel territorio fanno registrare **prezzi di vendita inferiori ai 196.000$.**
+Sono **pochissimi** gli alloggi venduti al di **sopra di questa cifra.**
+
+* **Situazione opposta**, invece, per il **College Creek**, zona del **Sud Edwards**, dove la maggioranza delle case fa registrare prezzi tra i **196.000$ ** ed i **243.000$ **, con un buon gruppetto di case con prezzi **superiori** ai **243.000$ **.
+
+* Nonostante questo dato, **la zona del College Creek risulta la seconda per numero di case vendute.**
+
+
+
+
+#### Tempo - Numero di case vendute per ogni anno.
+```{r}
+cy <- ames %>% 
+  group_by(Year_Sold) %>% 
+  summarise(count = n()) %>% 
+  arrange(count)
+
+## Graficamente
+cy %>% 
+  ggplot(aes(x = Year_Sold, y = count)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = count), vjust = 1.6, color = "white",
+            size = 3.5) +
+  ggtitle("House Sold for Year") +
+  xlab("Year") +
+  ylab("")
+
+```
+
+<br>
+
+#### L'aspetto temporale incide sui prezzi?
+```{r}
+ames %>% 
+  ggplot(aes(x = Year_Sold, y = (Sale_Price/1000))) +
+  geom_jitter() +
+  geom_smooth(method = "loess") +
+  ggtitle("SalePrice Vs Year") +
+  xlab("Year") +
+  ylab("SalePrice in $1000")
+```
+
+* Sembra che il fattore temporale **non** abbia incidenza sul
+prezzo delle case.
+
+* Interessante notare che tra il **2008 ed il 2010 non assistiamo ad un calo dei prezzi**, nonostante il campione rappresenti il
+periodo della **Grande Recessione, avvenuta tra il 2007 ed il 2013.**
+
+* Infatti, questo avvenimento ebbe conseguenze dure per **l'intero Paese**, ma a quanto pare, **ad Ames i prezzi non hanno subito nessuna variazione e in positivo e in negativo, ma sono rimasti stabili.**
+
+* Risulta altrettanto interessante che non solo i prezzi non sono diminuiti tra il 2008 ed il 2010, ma il **2009 risulta addirittura il miglior anno in termini di vendite.**
+
+* Possiamo ipotizzare che il calo delle vendite nel **2010**, sia dovuto agli effetti della Grande Recessione oppure alla mancanza di osservazioni nel suddetto anno.
+
+
+**---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------**
+
+#### Analisi sul Prezzo e sul Log(Prezzo)
+```{r}
+price_plot <- ames %>% 
+  ggplot(aes(Sale_Price)) +
+           geom_histogram(aes(y = ..density..)) +
+  stat_function(fun = dnorm, color = "red",
+                args =
+                  list(mean = mean(ames$Sale_Price),
+                            sd = sd(ames$Sale_Price))) +
+  ggtitle("SalePrice Distribution") +
+  xlab("") +
+  theme(plot.title = element_text(size = 11))
+  
+## Distribuzione del Log(prezzo)
+price_log_plot <- ames %>% 
+  ggplot(aes(log(Sale_Price))) +
+           geom_histogram(aes(y = ..density..)) +
+  stat_function(fun = dnorm, color = "red",
+                args =
+                  list(mean = mean(log(ames$Sale_Price)),
+                            sd = sd(log(ames$Sale_Price)))) +
+  ggtitle("Log(SalePrice) Distribution") +
+  xlab("") +
+  theme(plot.title = element_text(size = 11))
+
+## Unisco i grafici
+ggarrange(price_plot, price_log_plot, nrow = 1, ncol = 2)
+```
+
+* Sembra avere maggiore senso considerare il **log dei prezzi**, che ci restituisce una **distribuzione quasi normalizzata dei dati.**
+
+Verifichiamo ancora...
+
+<br>
+
+##### Q-Q Plot 
+```{r}
+## Q-Q Plot su SalePrice
+qq1 <- ggplot(ames, aes(sample = ames$Sale_Price)) +
+  stat_qq() +
+  stat_qq_line(col = "red") +
+  labs(title = "Distribution of Quantiles",
+       subtitle = "SalePrice")
+
+## Q-Q Plot su Log(SalePrice)
+qq2 <- ggplot(ames, aes(sample = log(ames$Sale_Price))) +
+  stat_qq() +
+  stat_qq_line(col = "red") +
+  labs(title = "Distribution of Quantiles",
+       subtitle = "Log(SalePrice)")
+
+ggarrange(qq1, qq2, nrow = 1, ncol = 2)
+```
+
+* Anche da questa visualizzazione, notiamo che effettivamente la **trasformata logaritmica** rende la distribuzione dei quantili **quasi vicina a quella normale.**
+
+* Si nota che la prima distribuzione **devia fortemente dalla normale**, specialmente nelle code.
+
+* Si vede **un'asimmetria positiva**, infatti la **coda di destra** risulta molto **spessa rispetto alla normale**, proprio **come la coda di sinistra.**
+
+* Il **comportamento** si avvicina a quello **normale**, solo nella **parte centrale** della distribuzione.
+
+<br>
+
+##### Boxplot
+```{r}
+## Boxplot SalePrice
+bx1 <- ggplot(ames, aes(x = ames$Sale_Price)) +
+  geom_boxplot() +
+  labs(title = "Boxplot - Sale Price") +
+  xlab("")
+
+## Boxplot Log(SalePrice)
+bx2 <- ggplot(ames, aes(x = log(ames$Sale_Price))) +
+  geom_boxplot() +
+  labs(title = "") +
+  labs(title = "Boxplot - Log(Sale Price)") +
+  xlab("")
+
+ggarrange(bx1, bx2, nrow = 2, ncol = 1)
+```
+
+* Abbiamo la **conferma** di quanto detto in precedenza riguardo l'asimmetria positiva.
+
+* Vediamo, infatti, che la distribuzione di **SalePrice presenta un'asimmetria positiva**, suggerita dal fatto che **il box di destra risulta maggiore in ampiezza rispetto al box di sinistra.**
+
+* Diciamo anche che **questa ampiezza viene conservata anche con la trasformata logaritmica, ma risulta molto meno evidente.**
+
+<br>
+
+#### Distribuzione della dimensione del lotto
+```{r}
+lotarea_plot <- ames %>% 
+  ggplot(aes(Lot_Area)) +
+           geom_histogram(aes(y = ..density..)) +
+  stat_function(fun = dnorm, color = "red",
+                args =
+                  list(mean = mean(ames$Lot_Area),
+                            sd = sd(ames$Lot_Area))) +
+  ggtitle("LotArea Distribution",
+          subtitle = "square feet") +
+  xlab("") +
+  theme(plot.title = element_text(size = 11))
+
+lotarea_plot_log <- ames %>% 
+  ggplot(aes(log(Lot_Area))) +
+           geom_histogram(aes(y = ..density..)) +
+  stat_function(fun = dnorm, color = "red",
+                args =
+                  list(mean = mean(log(ames$Lot_Area)),
+                       sd = sd(log(ames$Lot_Area)))) +
+  ggtitle("Log(LotArea) Distribution",
+          subtitle = "*square feet") +
+  xlab("") +
+  theme(plot.title = element_text(size = 11))
+
+## Unisco i grafici
+ggarrange(lotarea_plot, lotarea_plot_log, nrow = 1, ncol = 2)
+
+## Anche in questo caso, ha più senso considerare il log della
+## variabile.
+```
+
+* **Aggiungiamo**, quindi, le **trasformate logaritmiche** al set di dati e le valuteremo poi per la costruzione del modello.
+
+<br>
+
+#### Quantili del Prezzo
+```{r}
+## Vediamo i quantili dei prezzi
+q <- quantile(ames$Sale_Price, probs = c(.25, 0.5, .75,.95))
+Q <- as.data.frame(q)
+colnames(Q) <- "SalePrice"
+rownames(Q) <- c("Q1", "Q2", "Q3", "P95")
+Q
+
+```
+
+Dal calcolo dei quantili, invece, possiamo osservare che:
+
+* Il **25% delle case meno costose**, ha un prezzo **inferiore a 130.000$ ** circa.
+
+* Case che **superano i 312.000$ circa **, si trovano nell'ultimo 5% della distribuzione ed il **prezzo mediano** si aggira **sui 158.000$ circa.**
+
+<br>
+
+```{r}
+ames <- ames %>% 
+  mutate(Log_Sale_Price = log(Sale_Price),
+         Log_Lot_Area = log(Lot_Area))
+```
+
+#### Quali caratteristiche hanno un'incidenza positiva sul Prezzo?
+```{r}
+## Seleziono alcune variabili continue
+cv <- ames %>% 
+  select(Log_Sale_Price, Gr_Liv_Area, Garage_Area, Full_Bath,
+         Year_Built, Year_Remod_Add, Fireplaces, Total_Bsmt_SF,
+         TotRms_AbvGrd)
+
+## Matrice di Correlazione
+R <- cor(cv)
+
+## Graficamente
+ggcorrplot::ggcorrplot(R, hc.order = T, type = "lower",
+                       lab = T)
+```
+
+* Sul prezzo della casa, **incide** in maniera positiva
+la **dimensione**, in termini di
+superficie calpestabile, nel cui calcolo includiamo anche
+la **dimensione del garage e del seminterrato.**
+
+* Hanno un ruolo importante anche il **numero di bagni** a disposizione,
+la **superficie interrata** e **l'anno di costruzione.**
+
+* Caratteristiche come la presenza del **camino e l'anno di ristrutturazione, sono meno importanti** ma comunque da tenere
+in considerazione.
+
+<br>
+
+#### Prezzo per quartiere
+```{r}
+ames %>% 
+  ggplot(aes(x = reorder(Neighborhood,Sale_Price/1000),
+                         y = Sale_Price/1000)) +
+  geom_boxplot() +
+  coord_flip() +
+  ggtitle("SalePrice Vs. Neighborhood") +
+  xlab("") +
+  ylab("SalePrice in $1000")
+```
+
+* **Medianamente** il quartiere con il **prezzo maggiore alto risulta Northridge**,
+seguito dal quartiere **Veenker** e dal quartiere **Stone_Brook.**
+
+* Il quartiere **meno costoso** risulta **Meadow_Village.**
+
+* Infine, quartieri come **Crawford, Somerest e Stone_Brook,** 
+presentano anche **un'importante variabilita dei prezzi**, a
+differenza di quartieri come **Gilbert o Mitchell** dove i prezzi
+sembrano essere meno variabili
+
+<br>
+
+**---------------------------------------------------------------------------------------------------------------------------------------------------**
+
+
+### Step 3 - Features Engineering
+```{r}
+## Total Porch
+ames$TotalPorch <- ames$Open_Porch_SF +
+  ames$Screen_Porch + ames$Enclosed_Porch +
+  ames$Three_season_porch
+
+
+## Total Bath
+## Consideriamo la totalità dei bagni, indipendentemente dalla
+## collocazione e dalla finitura
+ames$TotalBath <- ames$Bsmt_Full_Bath + 
+  ames$Bsmt_Half_Bath + ames$Full_Bath + 
+  ames$Half_Bath
+
+
+## Total FLRSF
+ames$TotalFLRSF <- ames$First_Flr_SF +
+  ames$Second_Flr_SF
+
+
+## Total Overall
+## One hot encoding - Overall_Cond diventa Overall_Cond_New
+ames <- ames %>% 
+  mutate(Overall_Cond_New = case_when(
+    Overall_Cond == "Very_Poor" | Overall_Cond == "Poor" ~ "1",
+    Overall_Cond == "Fair" | Overall_Cond == "Below_Average" ~ "2",
+    Overall_Cond == "Average" ~ "3",
+    Overall_Cond == "Above_Average" | Overall_Cond == "Good" |
+      Overall_Cond == "Very_Good" ~ "4",
+    Overall_Cond == "Excellent" |
+      Overall_Cond == "Very_Excellent" ~ "5"))
+## 1 = Povero
+## 2 = Sotto la media
+## 3 = Nella media
+## 4 = Sopra la media
+## 5 = Eccellente
+
+## One hot encoding - Overall_Qual diventa Overall_Qual_New
+ames <- ames %>% 
+  mutate(Overall_Qual_New = case_when(
+    Overall_Qual == "Very_Poor" | Overall_Qual == "Poor" ~ "1",
+    Overall_Qual == "Fair" | Overall_Qual == "Below_Average" ~ "2",
+    Overall_Qual == "Average" ~ "3",
+    Overall_Qual == "Above_Average" | Overall_Qual == "Good" |
+      Overall_Qual == "Very_Good" ~ "4",
+    Overall_Qual == "Excellent" |
+      Overall_Qual == "Very_Excellent" ~ "5"))
+## 1 = Povero
+## 2 = Sotto la media
+## 3 = Nella media
+## 4 = Sopra la media
+## 5 = Eccellente
+
+## Total Overall [1;25]
+ames$TotalOverall <- as.numeric(ames$Overall_Cond_New) *
+  as.numeric(ames$Overall_Qual_New)
+
+
+## Total Kitchen [0:8]
+## One hot encoding - Kitchen_Qual diventa Kitchen_Qual_New
+ames <- ames %>% 
+  mutate(Kitchen_Qual_New = case_when(
+    Kitchen_Qual == "Poor" ~ "1",
+    Kitchen_Qual == "Fair" ~ "2",
+    Kitchen_Qual == "Typical" ~ "3",
+    Kitchen_Qual == "Good" ~ "4",
+    Kitchen_Qual == "Excellent" ~ "5"))
+## 1 = Povero
+## 2 = Discreto
+## 3 = Normale
+## 4 = Buono
+## 5 = Eccellente
+
+## Total Kitchen
+ames$TotalKitchen <- as.numeric(ames$Kitchen_Qual_New) *
+  ames$Kitchen_AbvGr
+
+
+## Total Garage [0;6]
+## One hot encoding - Garage_Cond diventa Garage_Cond_New
+ames <- ames %>% 
+  mutate(Garage_Cond_New = case_when(
+    Garage_Cond == "No_Garage" ~ "0",
+    Garage_Cond == "Poor" ~ "1",
+    Garage_Cond == "Fair" ~ "2",
+    Garage_Cond == "Typical" ~ "3",
+    Garage_Cond == "Good" ~ "5",
+    Garage_Cond == "Excellent" ~ "6"))
+## 0 = Garage non presente
+## 1 = Povero
+## 2 = Discreto
+## 3 = Normale
+## 4 = Buono
+## 5 = Eccellente
+
+## One hot encoding - Garage_Qual diventa Garage_Qual_New
+ames <- ames %>% 
+  mutate(Garage_Qual_New = case_when(
+    Garage_Qual == "No_Garage" ~ "0",
+    Garage_Qual == "Poor" ~ "1",
+    Garage_Qual == "Fair" ~ "2",
+    Garage_Qual == "Typical" ~ "3",
+    Garage_Qual == "Good" ~ "5",
+    Garage_Qual == "Excellent" ~ "6"))
+
+## Total Garage [0;36]
+ames$TotalGarage <- as.numeric(ames$Garage_Cond_New) *
+  as.numeric(ames$Garage_Qual_New)
+
+
+## Total Exter
+## One hot encoding - Exter_Cond diventa Exter_Cond_New
+ames <- ames %>% 
+  mutate(Exter_Cond_New = case_when(
+    Exter_Cond == "Poor" ~ "1",
+    Exter_Cond == "Fair" ~ "2",
+    Exter_Cond == "Typical" ~ "3",
+    Exter_Cond == "Good" ~ "4",
+    Exter_Cond == "Excellent" ~ "5"))
+
+## One hot encoding - Exter_Qual diventa Exter_Qual_New
+ames <- ames %>% 
+  mutate(Exter_Qual_New = case_when(
+    Exter_Qual == "Poor" ~ "1",
+    Exter_Qual == "Fair" ~ "2",
+    Exter_Qual == "Typical" ~ "3",
+    Exter_Qual == "Good" ~ "4",
+    Exter_Qual == "Excellent" ~ "5"))
+
+## Total Exter
+ames$TotalExter <- as.numeric(ames$Exter_Cond_New) *
+  as.numeric(ames$Exter_Qual_New)
+```
+
+Per questo step, prendiamo delle variabili che si riferiscono alle
+stesse caratteristiche per **combinarle tra loro ed ottenere un'informazione sintetica e facile da interpretare.**
+
+* Alcune trasformazioni riguardano le seguenti variabili:
+    + **TotalPorch** = Open_Porch_SF + Screen_Porch + 
+    Enclosed_Porch + Three_season_porch.
+    + **TotalBath**  = Bsmt_Full_Bath + Bsmt_Half_Bath +
+    Full_Bath + Half_Bath.
+    + **TotalFLRSF** = First_Flr_SF + Second_Flr_SF.
+
+* Con queste trasformazioni, abbiamo raccolto in **TotalPorch** tutta **l'informazione relativa all'area del porticato**, indipendentemente se l'area risulta recintata, aperta o altro.
+
+* Si sintetizza con **TotalBath**, invece, l'informazione sul **numero di bagni indipendentemente dalla collocazione e dalla finitura.**
+
+* Infine, con **TotalFLRSF**, abbiamo l'informazione sui metri **quadrati del primo e del secondo piano.**
+
+* Altre trasformazioni riguardano:
+    + **TotalOverall** = Overall_Cond_New * Overall_Qual_New.
+    + **TotalKitchen** = Kitchen_Qual_New * Kitchen_AbvGr.
+    + **TotalGarage**  = Garage_Cond_New * Garage_Qual_New.
+    + **TotalExter**   = Exter_Cond_New * Exter_Qual_New.
+    
+* **TotalOverall** indica l'aspetto **qualitativo della casa** in base ai **materiali, ed alla condizione della casa.**
+
+* **TotalKitchen** e **TotalGarage** indicano le **condizioni** rispettivamente della **cucina** e del **garage.**
+
+* Infine, **TotalExter** contiene l'informazione sull'aspetto **qualitativo dei materiali dell'esterno degli alloggi.**
+
+
+
+
+**---------------------------------------------------------------------------------------------------------------------------------------------------**
+
+
+### Step 4 - Models
+<br>
+![](C:\Users\david\Desktop\AmesHousing_Project\Ridge-LassoBen.png)
+<br>
+
+```{r}
+## Predittori
+x <- model.matrix(Log_Sale_Price ~ ., data = ames)
+
+## Variabile da prevedere
+y <- ames$Log_Sale_Price
+
+## Divido i dati in train e test
+set.seed(123)
+ames_split <- initial_split(ames, prop = .7)
+ames_train <- training(ames_split)
+ames_test <- testing(ames_split)
+```
+<br>
+
+* Sia la stima ottenuta con il **metodo Ridge** che con il **metodo Lasso** sono **regressioni penalizzate**; ovvero **metodi che si basano sulla penalizzazione della funzione obiettivo**, aggiungendo a quest'ultima un **termine di penalizzazione** che agisce sui parametri di Beta.
+
+* Il problema di ottimizzazione, quindi, diventa un **problema di ottimizzazione vincolata**, dove il vincolo viene rappresentato dalla **somma dei quadrati dei coefficienti, ponendola minore di una certa costance C** con la Ridge Regression.
+
+* Utilizzando il **Lasso**, invece, il **vincolo** ha una forma valore **assoluto** e non quadratico.
+Questo si traduce **geometricamente** in un **rombo** e non in una circonferenza.
+
+* Il vantaggio di utilizzare una regressione di tipo **Lasso**, e non una regressione Ridge, sta nel fatto che con il Lasso **i coefficienti non vengono solo tirati verso lo 0, ma vengono effettivamente posti a zero.**
+Questa differenza fa emergere un ulteriore aspetto discriminante tra i due approcci; ovvero che l'approccio **Lasso ci permette di ottenere contemporaneamente sia le stime, sia una selezione delle variabili.**
+
+* Inoltre, **anche per i coefficienti che sono diversi da zero**, con la regressione **Lasso vengono comunque tirati maggiormente verso lo zero**, rispetto a quanto avviene con la regressione Ridge.
+
+<br>
+
+#### Ridge 
+##### Stime Ridge 
+
+![](C:\Users\david\Desktop\AmesHousing_Project\RidgeFinal.png)
+```{r}
+## Costruisco il modello Ridge
+model_ridge <- glmnet(x, y, alpha = 0, nlambda = 100)
+
+#plot(model_ridge, xvar = "lambda", label = T)
+```
+
+#### Lambda ottimale utilizzando la Cross-Validation
+```{r}
+## CV per lambda
+set.seed(123)
+cv_ridge <- cv.glmnet(x, y, alpha = 0)
+#plot(cv_ridge)
+```
+
+##### Valore minimo di Lambda
+```{r}
+cv_ridge$lambda.min
+```
+
+```{r}
+ridge_min <- glmnet(x, y, alpha = 0, lambda = cv_ridge$lambda.min)
+
+## Previsione
+x_test <- model.matrix(Log_Sale_Price ~., ames_test)
+prev_rigde_min <- ridge_min %>% 
+  predict(x_test) %>% 
+  as.vector()
+```
+
+<br>
+
+#### Lasso 
+##### Stime Lasso 
+
+![](C:\Users\david\Desktop\AmesHousing_Project\LassoFinal.png)
+```{r}
+## Costruisco il modello Lasso
+model_lasso <- glmnet(x, y, alpha = 1)
+
+#plot(model_lasso, xvar = "lambda")
+```
+
+#### Lambda ottimale utilizzando la Cross-Validation
+```{r}
+## CV
+set.seed(1234)
+cv_lasso <- cv.glmnet(x, y, alpha = 1, nfolds = 10)
+
+#plot(cv_lasso)
+```
+
+##### Valore minimo di Lambda
+```{r}
+cv_lasso$lambda.min
+```
+
+```{r}
+lasso_min <- glmnet(x, y, alpha = 1, lambda = cv_lasso$lambda.min)
+
+## Previsione
+x_test <- model.matrix(Log_Sale_Price ~., ames_test)
+prev_lasso_min <- lasso_min %>% 
+  predict(x_test) %>% 
+  as.vector()
+```
+
+<br>
+
+#### Performance con Lambda.min
+```{r}
+data.frame(RMSE = RMSE(prev_lasso_min, ames_test$Log_Sale_Price),
+           R2 = R2(prev_lasso_min, ames_test$Log_Sale_Price))
+
+```
+
+
+#### Elastic Net 
+##### Stime Elastic Net 
+<br>
+![](C:\Users\david\Desktop\AmesHousing_Project\FormulaBen.png)
+
+
+* Con l'**Elastic Net**,si vuole prendere il meglio dell'approccio Ridge e del Lasso, quindi trovare un **compromesso tra la penalizzazione in norma L1 e quella in norma L2.**
+
+* Nella penalizzazione, viene aggiunto un **nuovo parametro**, ovvero **Alpha**, il cui valore ci permette di **tirare la penalizzazione stessa verso un vincolo di tipo ridge o di tipo lasso.**
+
+* Il **vantaggio** di quest'approccio sta nel fatto che possiamo sia fare **variable selection**, sia superare i problemi dell'approccio Lasso.
+
+* Infine, con questo approccio **non abbiamo limitazioni sul numero di variabili selezionate**(differenza con l'approccio lasso) ed in presenza di variabili con correlazioni di gruppo, non abbiamo problemi.
+
+* Questo vantaggio lo paghiamo in **termini di scelta**, in quanto i parametri da fissare saranno due: **Lambda** per il livello di shrinkage ed **Alpha** per l'elasticity della net.
+
+* Per la **scelta di Lamda**, utilizziamo la **K-Fold Cross Validation.**
+Questa tecnica consiste nella **suddivisione dell'insieme di dati totale in k parti** di uguale dimensione e, ad ogni passo, la **k-esima parte dell'insieme di dati viene ad essere quella di convalida**, mentre la **restante parte costituisce sempre l'insieme di addestramento**. In questo modo, si allena il modello per ognuna delle k parti, evitando quindi problemi di sovradattamento, ma anche di campionamento asimmetrico del campione osservato, che succede tipicamente quando si suddividono i dati in due sole parti.
+
+* Ricordiamo che i dati vengono casualmente partizionati in k-folds(sottocampioni) che non condivideranno alcuna osservazione:
+<center>
+![](C:\Users\david\Desktop\AmesHousing_Project\K-Fold.png)
+
+* La grandezza del **train** e del **test** viene determinata da **k.** Infatti in ogni fold avremo una frazione di n/k dati, quindi: avremo **1 - n/k** per la frazione di dati assegnata al training set e **n/k** per la frazione di dati assegnata al test set.
+
+* **Quale errore stima CV?**
+
+* CV stima l'**Err**, ovvero **l'Expected Test Error**, inteso anche come il **valore atteso del test error rispetto a tutti i possibili train sample.**
+<center>
+![](C:\Users\david\Desktop\AmesHousing_Project\SchemaErrFinal.png)
+
+
+```{r}
+## Costruisco l'elastic regression
+el.5 <- cv.glmnet(x, y, alpha = .5)
+
+#plot(el.5)
+```
+
+#### Lambda ottimale utilizzando la Cross-Validation
+<br>
+![](C:\Users\david\Desktop\AmesHousing_Project\ENFinal.png)
+```{r}
+#### Lambda ottimale utilizzando la Cross-Validation
+## Proviamo per differenti valori di alpha
+el0  <- cv.glmnet(x, y, alpha = 0)
+el.2 <- cv.glmnet(x, y, alpha = .2)
+el.8 <- cv.glmnet(x, y, alpha = .8)
+el1  <- cv.glmnet(x, y, alpha = 1)
+
+## Visualizziamo i grafici 
+par(mfrow = c(1,1))
+#plot(log(el1$lambda), el1$cvm, pch = 19, col = "red",
+ #    xlab = "Log(Lambda)", ylab = el1$name)
+#points(log(el.8$lambda), el.8$cvm, pch = 19, col = "dark grey")
+#points(log(el.5$lambda), el.5$cvm, pch = 19, col = "grey")
+#points(log(el.2$lambda), el.2$cvm, pch = 19, col = "light grey")
+#points(log(el0$lambda), el0$cvm, pch = 19, col = "blue")
+#legend("topleft", legend = c("alpha = 1",
+ #                            "alpha = .8",
+  #                           "alpha = .5",
+   #                          "alpha = .2",
+    #                         "alpha = 0"),
+     #  pch = 19, col = c("red",
+      #                   "dark grey",
+       #                  "grey",
+        #                 "light grey",
+         #                "blue"))
+
+## Stimo i modelli
+mod.el1  <- glmnet(x, y, alpha = 1, lambda = el1$lambda.min)
+mod.el.8 <- glmnet(x, y, alpha = .8, lambda = el.8$lambda.min)
+mod.el.5 <- glmnet(x, y, alpha = .5, lambda = el.5$lambda.min)
+mod.el.2 <- glmnet(x, y, alpha = .2, lambda = el.2$lambda.min)
+mod.el0  <- glmnet(x, y, alpha = 0, lambda = el0$lambda.min)
+
+## Previsione
+x_test <- model.matrix(Log_Sale_Price ~ ., ames_test)
+
+prev.el1 <- mod.el1 %>% 
+  predict(x_test) %>% 
+  as.vector()
+
+prev.el.8 <- mod.el.8 %>% 
+  predict(x_test) %>% 
+  as.vector()
+
+prev.el.5 <- mod.el.5 %>% 
+  predict(x_test) %>% 
+  as.vector()
+
+prev.el.2 <- mod.el.2 %>% 
+  predict(x_test) %>% 
+  as.vector()
+
+prev.el0 <- mod.el0 %>% 
+  predict(x_test) %>% 
+  as.vector()
+```
+
+<br>
+
+#### Performance con Lambda.min
+```{r}
+df.el1 <- data.frame(RMSE = RMSE(prev.el1, ames_test$Log_Sale_Price),
+                     R2 = R2(prev.el1, ames_test$Log_Sale_Price))
+
+df.el.8 <- data.frame(RMSE =
+                        RMSE(prev.el.8, ames_test$Log_Sale_Price),
+                     R2 =
+                       R2(prev.el.8, ames_test$Log_Sale_Price))
+
+df.el.5 <- data.frame(RMSE =
+                        RMSE(prev.el.5, ames_test$Log_Sale_Price),
+                     R2 =
+                       R2(prev.el.5, ames_test$Log_Sale_Price))
+
+df.el.2 <- data.frame(RMSE =
+                        RMSE(prev.el.2,ames_test$Log_Sale_Price),
+                     R2 =
+                       R2(prev.el.2, ames_test$Log_Sale_Price))
+
+df.el0 <- data.frame(RMSE =
+                       RMSE(prev.el0, ames_test$Log_Sale_Price),
+                     R2 =
+                       R2(prev.el0, ames_test$Log_Sale_Price))
+
+df <- rbind(df.el1, df.el.8, df.el.5, df.el.2, df.el0)
+rownames(df) <- c("el 1", "el 0.8", "el 0.5", "el 0.2", "el 0")
+df
+
+```
+
+<br>
+<br>
+
+
+
