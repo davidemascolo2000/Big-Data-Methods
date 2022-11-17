@@ -1,4 +1,7 @@
 # Big-Data-Methods
 
-This repository contains the **Ames Housing Analysis** project carried out in the third year of the bachelor's degree at the University of Salerno, for the **Big Data Methods course**.
-Year of development: 2020/2021.
+> Ames Housing.Rmd:
+- analysis of [Ames Housing Dataset](https://www.kaggle.com/datasets/prevek18/ames-housing-dataset).
+
+> Ames Housing.html:
+- final report.
